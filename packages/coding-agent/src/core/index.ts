@@ -11,10 +11,16 @@ export {
 	type PromptOptions,
 	type SessionStats,
 } from "./agent-session.js";
+// Analytics, Monitoring & Performance
+export {
+	type AnalyticsConfig,
+	type AnalyticsEvent,
+	type AnalyticsEventType,
+	AnalyticsManager,
+} from "./analytics.js";
 export { type BashExecutorOptions, type BashResult, executeBash, executeBashWithOperations } from "./bash-executor.js";
 export type { CompactionResult } from "./compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
-
 // Extensions system
 export {
 	type AgentEndEvent,
@@ -59,3 +65,17 @@ export {
 	type TurnStartEvent,
 	wrapToolsWithExtensions,
 } from "./extensions/index.js";
+export {
+	type PerformanceMetric,
+	PerformanceMonitor,
+	type PerformanceStats,
+} from "./performance-monitor.js";
+export {
+	type RateLimitConfig,
+	RateLimiter,
+	type RateLimitStatus,
+} from "./rate-limiter.js";
+export {
+	type SessionMetrics,
+	SessionMetricsTracker,
+} from "./session-metrics.js";
