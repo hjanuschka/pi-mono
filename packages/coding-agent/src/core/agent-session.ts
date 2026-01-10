@@ -546,6 +546,20 @@ export class AgentSession {
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 
+		// Telemetry
+		const telemetry = this.agent.telemetryInterface;
+		if (telemetry) {
+			if ("trackInputPrompt" in telemetry) {
+				(telemetry as any).trackInputPrompt(false, false);
+			}
+			if ("trackToolSearchModeDecision" in telemetry) {
+				(telemetry as any).trackToolSearchModeDecision();
+			}
+			if ("trackContextSize" in telemetry) {
+				(telemetry as any).trackContextSize(0);
+			}
+		}
+
 		// Handle extension commands first (execute immediately, even during streaming)
 		// Extension commands manage their own LLM interaction via pi.sendMessage()
 		if (expandPromptTemplates && text.startsWith("/")) {

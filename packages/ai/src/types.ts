@@ -59,6 +59,13 @@ export type Provider = KnownProvider | string;
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 
+export interface TelemetryInterface {
+	trackBeforeNormalize(msgCount: number): Promise<void>;
+	trackAfterNormalize(msgCount: number): Promise<void>;
+	trackApiCacheBreakpoints(messageCount: number, cachingEnabled: boolean): Promise<void>;
+	trackCacheStats(hits: number, misses: number): Promise<void>;
+}
+
 /** Token budgets for each thinking level (token-based providers only) */
 export interface ThinkingBudgets {
 	minimal?: number;
@@ -79,6 +86,7 @@ export interface StreamOptions {
 	 * session-aware features. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
+	telemetry?: TelemetryInterface;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()

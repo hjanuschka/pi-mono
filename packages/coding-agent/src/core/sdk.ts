@@ -26,6 +26,7 @@ import { join } from "path";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import { AuthStorage } from "./auth-storage.js";
+import { ClaudeCodeTelemetry } from "./claude-telemetry.js";
 import { createEventBus, type EventBus } from "./event-bus.js";
 import {
 	createExtensionRuntime,
@@ -355,6 +356,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd);
 	time("sessionManager");
 
+	const telemetry = new ClaudeCodeTelemetry({
+		sessionId: sessionManager.getSessionId(),
+		enabled: true,
+	});
+	telemetry.trackInit().catch(() => {});
+
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	time("loadSession");
@@ -620,6 +627,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		sessionId: sessionManager.getSessionId(),
+		telemetry,
 		transformContext: extensionRunner
 			? async (messages) => {
 					return extensionRunner.emitContext(messages);

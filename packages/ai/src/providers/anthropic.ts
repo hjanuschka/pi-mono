@@ -140,7 +140,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 		try {
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const { client, isOAuthToken } = createClient(model, apiKey, options?.interleavedThinking ?? true);
+
+			if (options?.telemetry) {
+				await options.telemetry.trackBeforeNormalize(context.messages.length).catch(() => {});
+			}
+
 			const params = buildParams(model, context, isOAuthToken, options);
+
+			if (options?.telemetry) {
+				await options.telemetry.trackAfterNormalize(params.messages.length).catch(() => {});
+				// Assuming caching is enabled if we are here, as buildParams adds cache_control
+				await options.telemetry.trackApiCacheBreakpoints(params.messages.length, true).catch(() => {});
+			}
+
 			const anthropicStream = client.messages.stream({ ...params, stream: true }, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
 
