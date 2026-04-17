@@ -94,7 +94,14 @@ import { ModelSelectorComponent } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
-import { SettingsSelectorComponent } from "./components/settings-selector.js";
+import {
+	type CommandRemapEntry,
+	type CommandTargetOption,
+	SettingsSelectorComponent,
+	type ShortcutRemapEntry,
+	type VirtualCommandMappingEntry,
+	type VirtualShortcutMappingEntry,
+} from "./components/settings-selector.js";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.js";
 import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
@@ -1578,7 +1585,17 @@ export class InteractiveMode {
 	 */
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void {
 		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
-		if (shortcuts.size === 0) return;
+		const virtualShortcuts = this.settingsManager.getVirtualShortcutRemaps();
+
+		const executeCommandByInvocationName = async (invocationName: string): Promise<void> => {
+			const normalizedName = invocationName.startsWith("/") ? invocationName.slice(1) : invocationName;
+			const command = extensionRunner.getCommand(normalizedName);
+			if (!command) {
+				this.showWarning(`Virtual shortcut target not found: /${normalizedName}`);
+				return;
+			}
+			await command.handler("", extensionRunner.createCommandContext());
+		};
 
 		// Create a context for shortcut handlers
 		const createContext = (): ExtensionContext => ({
@@ -1612,6 +1629,15 @@ export class InteractiveMode {
 
 		// Set up the extension shortcut handler on the default editor
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
+			for (const [shortcutStr, targetCommand] of Object.entries(virtualShortcuts)) {
+				if (matchesKey(data, shortcutStr as KeyId)) {
+					Promise.resolve(executeCommandByInvocationName(targetCommand)).catch((err) => {
+						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
+					});
+					return true;
+				}
+			}
+
 			for (const [shortcutStr, shortcut] of shortcuts) {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
@@ -3644,8 +3670,158 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private buildCommandRemapEntries(): CommandRemapEntry[] {
+		const extensionRunner = this.session.extensionRunner;
+		if (!extensionRunner) {
+			return [];
+		}
+
+		const groupedCommands = new Map<string, ReturnType<ExtensionRunner["getRegisteredCommands"]>>();
+		for (const command of extensionRunner.getRegisteredCommands()) {
+			const group =
+				groupedCommands.get(command.name) ?? ([] as ReturnType<ExtensionRunner["getRegisteredCommands"]>);
+			group.push(command);
+			groupedCommands.set(command.name, group);
+		}
+
+		const configuredRemaps = this.settingsManager.getCommandRemaps();
+		const remapEntries: CommandRemapEntry[] = [];
+		for (const [commandName, commands] of groupedCommands) {
+			if (commands.length < 2) {
+				continue;
+			}
+
+			const remapKey = `/${commandName}`;
+			const activeTarget = commands.find((command) => command.invocationName === command.name)?.sourceInfo.path;
+			const currentTarget = configuredRemaps[remapKey] ?? configuredRemaps[commandName];
+			const candidates = commands.map((command) => {
+				const sourceLabel = this.getCompactExtensionLabel(command.sourceInfo.path, command.sourceInfo);
+				const invocationLabel =
+					command.invocationName === command.name ? `/${command.name}` : `/${command.invocationName}`;
+				const descriptionParts = [
+					`Current alias: ${invocationLabel}`,
+					command.description,
+					this.formatDisplayPath(command.sourceInfo.path),
+				].filter((part): part is string => typeof part === "string" && part.length > 0);
+
+				return {
+					target: command.sourceInfo.path,
+					label: sourceLabel,
+					description: descriptionParts.join(" · "),
+				};
+			});
+
+			remapEntries.push({
+				command: commandName,
+				currentTarget,
+				activeTarget,
+				candidates,
+			});
+		}
+
+		remapEntries.sort((a, b) => a.command.localeCompare(b.command));
+		return remapEntries;
+	}
+
+	private buildShortcutRemapEntries(): ShortcutRemapEntry[] {
+		const extensionRunner = this.session.extensionRunner;
+		if (!extensionRunner) {
+			return [];
+		}
+
+		const groupedShortcuts = new Map<string, ReturnType<ExtensionRunner["getRegisteredShortcuts"]>>();
+		for (const shortcut of extensionRunner.getRegisteredShortcuts()) {
+			const key = shortcut.shortcut.toLowerCase();
+			const group = groupedShortcuts.get(key) ?? ([] as ReturnType<ExtensionRunner["getRegisteredShortcuts"]>);
+			group.push(shortcut);
+			groupedShortcuts.set(key, group);
+		}
+
+		const configuredRemaps = this.settingsManager.getShortcutRemaps();
+		const activeShortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
+		const extensionSourceInfoByPath = new Map(
+			this.session.resourceLoader
+				.getExtensions()
+				.extensions.map((extension) => [extension.path, extension.sourceInfo]),
+		);
+		const remapEntries: ShortcutRemapEntry[] = [];
+		for (const [shortcutKey, shortcuts] of groupedShortcuts) {
+			if (shortcuts.length < 2) {
+				continue;
+			}
+
+			const activeTarget = activeShortcuts.get(shortcutKey as KeyId)?.extensionPath;
+			const currentTarget = configuredRemaps[shortcutKey];
+			const candidates = shortcuts.map((shortcut) => {
+				const sourceInfo = extensionSourceInfoByPath.get(shortcut.extensionPath);
+				const sourceLabel = this.getCompactExtensionLabel(shortcut.extensionPath, sourceInfo);
+				const descriptionParts = [shortcut.description, this.formatDisplayPath(shortcut.extensionPath)].filter(
+					(part): part is string => typeof part === "string" && part.length > 0,
+				);
+
+				return {
+					target: shortcut.extensionPath,
+					label: sourceLabel,
+					description: descriptionParts.join(" · "),
+				};
+			});
+
+			remapEntries.push({
+				shortcut: shortcutKey,
+				currentTarget,
+				activeTarget,
+				candidates,
+			});
+		}
+
+		remapEntries.sort((a, b) => a.shortcut.localeCompare(b.shortcut));
+		return remapEntries;
+	}
+
+	private buildCommandTargetOptions(): CommandTargetOption[] {
+		const extensionRunner = this.session.extensionRunner;
+		if (!extensionRunner) {
+			return [];
+		}
+
+		const options = extensionRunner.getRegisteredCommands().map((command) => {
+			const sourceLabel = this.getCompactExtensionLabel(command.sourceInfo.path, command.sourceInfo);
+			const descriptionParts = [command.description, sourceLabel].filter(
+				(part): part is string => typeof part === "string" && part.length > 0,
+			);
+			return {
+				value: command.invocationName,
+				label: `/${command.invocationName}`,
+				description: descriptionParts.join(" · "),
+			};
+		});
+
+		const uniqueOptions = new Map<string, CommandTargetOption>();
+		for (const option of options) {
+			uniqueOptions.set(option.value, option);
+		}
+		return Array.from(uniqueOptions.values()).sort((a, b) => a.value.localeCompare(b.value));
+	}
+
+	private buildVirtualCommandMappings(): VirtualCommandMappingEntry[] {
+		return Object.entries(this.settingsManager.getVirtualCommandRemaps())
+			.map(([alias, targetCommand]) => ({ alias, targetCommand }))
+			.sort((a, b) => a.alias.localeCompare(b.alias));
+	}
+
+	private buildVirtualShortcutMappings(): VirtualShortcutMappingEntry[] {
+		return Object.entries(this.settingsManager.getVirtualShortcutRemaps())
+			.map(([shortcut, targetCommand]) => ({ shortcut, targetCommand }))
+			.sort((a, b) => a.shortcut.localeCompare(b.shortcut));
+	}
+
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
+			const commandRemapEntries = this.buildCommandRemapEntries();
+			const shortcutRemapEntries = this.buildShortcutRemapEntries();
+			const virtualCommandMappings = this.buildVirtualCommandMappings();
+			const virtualShortcutMappings = this.buildVirtualShortcutMappings();
+			const commandTargets = this.buildCommandTargetOptions();
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
@@ -3670,6 +3846,11 @@ export class InteractiveMode {
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
+					commandRemapEntries,
+					shortcutRemapEntries,
+					virtualCommandMappings,
+					virtualShortcutMappings,
+					commandTargets,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -3771,6 +3952,85 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
+					},
+					onCommandRemapChange: (commandName, target) => {
+						const nextRemaps = this.settingsManager.getGlobalCommandRemaps();
+						delete nextRemaps[commandName];
+						delete nextRemaps[`/${commandName}`];
+						if (target) {
+							nextRemaps[`/${commandName}`] = target;
+						}
+						const nextCommandRemaps = Object.keys(nextRemaps).length > 0 ? nextRemaps : undefined;
+						this.settingsManager.setCommandRemaps(nextCommandRemaps);
+						this.session.extensionRunner?.setCommandRemaps(this.settingsManager.getCommandRemaps());
+						this.setupAutocomplete(this.fdPath);
+					},
+					onShortcutRemapChange: (shortcut, target) => {
+						const nextRemaps = this.settingsManager.getGlobalShortcutRemaps();
+						const normalizedShortcut = shortcut.toLowerCase();
+						delete nextRemaps[shortcut];
+						delete nextRemaps[normalizedShortcut];
+						if (target) {
+							nextRemaps[normalizedShortcut] = target;
+						}
+						const nextShortcutRemaps = Object.keys(nextRemaps).length > 0 ? nextRemaps : undefined;
+						this.settingsManager.setShortcutRemaps(nextShortcutRemaps);
+						const extensionRunner = this.session.extensionRunner;
+						if (extensionRunner) {
+							extensionRunner.setShortcutRemaps(this.settingsManager.getShortcutRemaps());
+							this.setupExtensionShortcuts(extensionRunner);
+						}
+					},
+					onSetVirtualCommand: (alias, targetCommand) => {
+						const nextAliases = this.settingsManager.getGlobalVirtualCommandRemaps();
+						if (targetCommand) {
+							nextAliases[alias] = targetCommand;
+						} else {
+							delete nextAliases[alias];
+						}
+						const nextVirtualCommands = Object.keys(nextAliases).length > 0 ? nextAliases : undefined;
+						this.settingsManager.setVirtualCommandRemaps(nextVirtualCommands);
+						this.session.extensionRunner?.setVirtualCommandRemaps(this.settingsManager.getVirtualCommandRemaps());
+						const entryIndex = virtualCommandMappings.findIndex((entry) => entry.alias === alias);
+						if (targetCommand) {
+							if (entryIndex >= 0) {
+								virtualCommandMappings[entryIndex] = { alias, targetCommand };
+							} else {
+								virtualCommandMappings.push({ alias, targetCommand });
+								virtualCommandMappings.sort((a, b) => a.alias.localeCompare(b.alias));
+							}
+						} else if (entryIndex >= 0) {
+							virtualCommandMappings.splice(entryIndex, 1);
+						}
+						this.setupAutocomplete(this.fdPath);
+					},
+					onSetVirtualShortcut: (shortcut, targetCommand) => {
+						const normalizedShortcut = shortcut.toLowerCase();
+						const nextShortcuts = this.settingsManager.getGlobalVirtualShortcutRemaps();
+						if (targetCommand) {
+							nextShortcuts[normalizedShortcut] = targetCommand;
+						} else {
+							delete nextShortcuts[normalizedShortcut];
+						}
+						const nextVirtualShortcuts = Object.keys(nextShortcuts).length > 0 ? nextShortcuts : undefined;
+						this.settingsManager.setVirtualShortcutRemaps(nextVirtualShortcuts);
+						const entryIndex = virtualShortcutMappings.findIndex(
+							(entry) => entry.shortcut === normalizedShortcut,
+						);
+						if (targetCommand) {
+							if (entryIndex >= 0) {
+								virtualShortcutMappings[entryIndex] = { shortcut: normalizedShortcut, targetCommand };
+							} else {
+								virtualShortcutMappings.push({ shortcut: normalizedShortcut, targetCommand });
+								virtualShortcutMappings.sort((a, b) => a.shortcut.localeCompare(b.shortcut));
+							}
+						} else if (entryIndex >= 0) {
+							virtualShortcutMappings.splice(entryIndex, 1);
+						}
+						const extensionRunner = this.session.extensionRunner;
+						if (extensionRunner) {
+							this.setupExtensionShortcuts(extensionRunner);
+						}
 					},
 					onCancel: () => {
 						done();

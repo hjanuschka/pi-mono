@@ -3,6 +3,8 @@ import type { Transport } from "@mariozechner/pi-ai";
 import {
 	Container,
 	getCapabilities,
+	getKeybindings,
+	Input,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
@@ -28,6 +30,89 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	xhigh: "Maximum reasoning (~32k tokens)",
 };
 
+const COMMAND_REMAP_AUTO_VALUE = "__auto__";
+
+export interface CommandRemapCandidate {
+	target: string;
+	label: string;
+	description?: string;
+}
+
+export interface CommandRemapEntry {
+	command: string;
+	currentTarget?: string;
+	activeTarget?: string;
+	candidates: CommandRemapCandidate[];
+}
+
+export interface ShortcutRemapCandidate {
+	target: string;
+	label: string;
+	description?: string;
+}
+
+export interface ShortcutRemapEntry {
+	shortcut: string;
+	currentTarget?: string;
+	activeTarget?: string;
+	candidates: ShortcutRemapCandidate[];
+}
+
+export interface CommandTargetOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+export interface VirtualCommandMappingEntry {
+	alias: string;
+	targetCommand: string;
+}
+
+export interface VirtualShortcutMappingEntry {
+	shortcut: string;
+	targetCommand: string;
+}
+
+function formatCommandRemapSummary(entries: CommandRemapEntry[]): string {
+	if (entries.length === 0) {
+		return "no conflicts";
+	}
+	const mappedCount = entries.filter((entry) => entry.currentTarget !== undefined).length;
+	return `${mappedCount}/${entries.length} mapped`;
+}
+
+function formatShortcutRemapSummary(entries: ShortcutRemapEntry[]): string {
+	if (entries.length === 0) {
+		return "no conflicts";
+	}
+	const mappedCount = entries.filter((entry) => entry.currentTarget !== undefined).length;
+	return `${mappedCount}/${entries.length} mapped`;
+}
+
+function formatRemapSummary(commandEntries: CommandRemapEntry[], shortcutEntries: ShortcutRemapEntry[]): string {
+	const total = commandEntries.length + shortcutEntries.length;
+	if (total === 0) {
+		return "no conflicts";
+	}
+	const mapped =
+		commandEntries.filter((entry) => entry.currentTarget !== undefined).length +
+		shortcutEntries.filter((entry) => entry.currentTarget !== undefined).length;
+	return `${mapped}/${total} mapped`;
+}
+
+function formatVirtualCommandSummary(entries: VirtualCommandMappingEntry[]): string {
+	return entries.length === 0 ? "none" : String(entries.length);
+}
+
+function formatVirtualShortcutSummary(entries: VirtualShortcutMappingEntry[]): string {
+	return entries.length === 0 ? "none" : String(entries.length);
+}
+
+function resolveTargetLabel(targetCommand: string, commandTargets: CommandTargetOption[]): string {
+	return commandTargets.find((target) => target.value === targetCommand)?.label ?? `/${targetCommand}`;
+}
+
 export interface SettingsConfig {
 	autoCompact: boolean;
 	showImages: boolean;
@@ -51,6 +136,11 @@ export interface SettingsConfig {
 	autocompleteMaxVisible: number;
 	quietStartup: boolean;
 	clearOnShrink: boolean;
+	commandRemapEntries: CommandRemapEntry[];
+	shortcutRemapEntries: ShortcutRemapEntry[];
+	virtualCommandMappings: VirtualCommandMappingEntry[];
+	virtualShortcutMappings: VirtualShortcutMappingEntry[];
+	commandTargets: CommandTargetOption[];
 }
 
 export interface SettingsCallbacks {
@@ -75,6 +165,10 @@ export interface SettingsCallbacks {
 	onAutocompleteMaxVisibleChange: (maxVisible: number) => void;
 	onQuietStartupChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
+	onCommandRemapChange: (command: string, target: string | undefined) => void;
+	onShortcutRemapChange: (shortcut: string, target: string | undefined) => void;
+	onSetVirtualCommand: (alias: string, targetCommand: string | undefined) => void;
+	onSetVirtualShortcut: (shortcut: string, targetCommand: string | undefined) => void;
 	onCancel: () => void;
 }
 
@@ -142,6 +236,538 @@ class SelectSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.selectList.handleInput(data);
+	}
+}
+
+class CommandRemapSubmenu extends Container {
+	private settingsList: SettingsList;
+
+	constructor(
+		entries: CommandRemapEntry[],
+		onRemapChange: (command: string, target: string | undefined) => void,
+		onDone: () => void,
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Command Remaps")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(theme.fg("muted", "Assign duplicate extension commands to a preferred extension target."), 0),
+		);
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = entries.map((entry) => ({
+			id: entry.command,
+			label: `/${entry.command}`,
+			description: `${entry.candidates.length} extension target${entry.candidates.length === 1 ? "" : "s"}`,
+			currentValue: this.getCurrentValueLabel(entry),
+			submenu: (_currentValue, done) => {
+				return new SelectSubmenu(
+					`Remap /${entry.command}`,
+					"Choose which extension should handle this command.",
+					[
+						{
+							value: COMMAND_REMAP_AUTO_VALUE,
+							label: `${entry.activeTarget === undefined ? "* " : "  "}Auto (no remap)`,
+							description: "Use default command suffix behavior",
+						},
+						...entry.candidates.map((candidate) => ({
+							value: candidate.target,
+							label: `${entry.activeTarget === candidate.target ? "* " : "  "}${candidate.label}`,
+							description: candidate.description,
+						})),
+					],
+					entry.currentTarget ?? COMMAND_REMAP_AUTO_VALUE,
+					(selected) => {
+						if (selected === COMMAND_REMAP_AUTO_VALUE) {
+							entry.currentTarget = undefined;
+							entry.activeTarget = undefined;
+							onRemapChange(entry.command, undefined);
+						} else {
+							entry.currentTarget = selected;
+							entry.activeTarget = selected;
+							onRemapChange(entry.command, selected);
+						}
+						done(this.getCurrentValueLabel(entry));
+					},
+					() => done(),
+				);
+			},
+		}));
+
+		this.settingsList = new SettingsList(items, 10, getSettingsListTheme(), () => {}, onDone, { enableSearch: true });
+		this.addChild(this.settingsList);
+	}
+
+	private getCurrentValueLabel(entry: CommandRemapEntry): string {
+		if (!entry.currentTarget) {
+			return "auto";
+		}
+		const selectedCandidate = entry.candidates.find((candidate) => candidate.target === entry.currentTarget);
+		return selectedCandidate?.label ?? entry.currentTarget;
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class ShortcutRemapSubmenu extends Container {
+	private settingsList: SettingsList;
+
+	constructor(
+		entries: ShortcutRemapEntry[],
+		onRemapChange: (shortcut: string, target: string | undefined) => void,
+		onDone: () => void,
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Shortcut Remaps")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(theme.fg("muted", "Assign duplicate extension shortcuts to a preferred extension target."), 0),
+		);
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = entries.map((entry) => ({
+			id: entry.shortcut,
+			label: entry.shortcut,
+			description: `${entry.candidates.length} extension target${entry.candidates.length === 1 ? "" : "s"}`,
+			currentValue: this.getCurrentValueLabel(entry),
+			submenu: (_currentValue, done) => {
+				return new SelectSubmenu(
+					`Remap ${entry.shortcut}`,
+					"Choose which extension should handle this shortcut.",
+					[
+						{
+							value: COMMAND_REMAP_AUTO_VALUE,
+							label: `${entry.activeTarget === undefined ? "* " : "  "}Auto (no remap)`,
+							description: "Use default shortcut precedence behavior",
+						},
+						...entry.candidates.map((candidate) => ({
+							value: candidate.target,
+							label: `${entry.activeTarget === candidate.target ? "* " : "  "}${candidate.label}`,
+							description: candidate.description,
+						})),
+					],
+					entry.currentTarget ?? COMMAND_REMAP_AUTO_VALUE,
+					(selected) => {
+						if (selected === COMMAND_REMAP_AUTO_VALUE) {
+							entry.currentTarget = undefined;
+							entry.activeTarget = undefined;
+							onRemapChange(entry.shortcut, undefined);
+						} else {
+							entry.currentTarget = selected;
+							entry.activeTarget = selected;
+							onRemapChange(entry.shortcut, selected);
+						}
+						done(this.getCurrentValueLabel(entry));
+					},
+					() => done(),
+				);
+			},
+		}));
+
+		this.settingsList = new SettingsList(items, 10, getSettingsListTheme(), () => {}, onDone, { enableSearch: true });
+		this.addChild(this.settingsList);
+	}
+
+	private getCurrentValueLabel(entry: ShortcutRemapEntry): string {
+		if (!entry.currentTarget) {
+			return "auto";
+		}
+		const selectedCandidate = entry.candidates.find((candidate) => candidate.target === entry.currentTarget);
+		return selectedCandidate?.label ?? entry.currentTarget;
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class AddVirtualMappingSubmenu extends Container {
+	private keyInput: Input;
+	private selectList: SelectList;
+	private step: "key" | "target" = "key";
+	private enteredKey = "";
+	private titleText: Text;
+	private descriptionText: Text;
+	private keyLabel: string;
+	private keyDescription: string;
+	private targetDescription: string;
+	private normalizeKey: (value: string) => string | undefined;
+	private onSubmit: (key: string, targetCommand: string) => void;
+	private onDone: () => void;
+
+	constructor(options: {
+		title: string;
+		keyLabel: string;
+		keyDescription: string;
+		targetDescription: string;
+		targets: CommandTargetOption[];
+		normalizeKey: (value: string) => string | undefined;
+		onSubmit: (key: string, targetCommand: string) => void;
+		onDone: () => void;
+	}) {
+		super();
+
+		this.keyLabel = options.keyLabel;
+		this.keyDescription = options.keyDescription;
+		this.targetDescription = options.targetDescription;
+		this.normalizeKey = options.normalizeKey;
+		this.onSubmit = options.onSubmit;
+		this.onDone = options.onDone;
+		this.titleText = new Text(theme.bold(theme.fg("accent", options.title)), 0, 0);
+		this.descriptionText = new Text(theme.fg("muted", options.keyDescription), 0, 0);
+		this.keyInput = new Input();
+
+		const targetOptions: SelectItem[] = options.targets.map((target) => ({
+			value: target.value,
+			label: target.label,
+			description: target.description,
+		}));
+		this.selectList = new SelectList(targetOptions, 10, getSelectListTheme(), SETTINGS_SUBMENU_SELECT_LIST_LAYOUT);
+		this.selectList.onSelect = (item) => {
+			this.onSubmit(this.enteredKey, item.value);
+			this.onDone();
+		};
+		this.selectList.onCancel = this.onDone;
+
+		this.renderKeyStep();
+	}
+
+	private renderKeyStep(): void {
+		this.clear();
+		this.addChild(this.titleText);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", this.keyLabel), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(this.keyInput);
+		this.addChild(new Spacer(1));
+		this.addChild(this.descriptionText);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Enter to continue · Esc to cancel"), 0, 0));
+	}
+
+	private renderTargetStep(): void {
+		this.clear();
+		this.addChild(this.titleText);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", `${this.keyLabel}: ${this.enteredKey}`), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", this.targetDescription), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(this.selectList);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel"), 0, 0));
+	}
+
+	handleInput(data: string): void {
+		const kb = getKeybindings();
+		if (this.step === "key") {
+			if (kb.matches(data, "tui.select.cancel")) {
+				this.onDone();
+				return;
+			}
+			if (kb.matches(data, "tui.select.confirm") || data === "\n") {
+				const normalized = this.normalizeKey(this.keyInput.getValue());
+				if (!normalized) {
+					this.descriptionText.setText(theme.fg("warning", this.keyDescription));
+					return;
+				}
+				this.enteredKey = normalized;
+				this.step = "target";
+				this.renderTargetStep();
+				return;
+			}
+			this.keyInput.handleInput(data);
+			return;
+		}
+
+		this.selectList.handleInput(data);
+	}
+}
+
+const REMOVE_MAPPING_VALUE = "__remove_mapping__";
+
+class VirtualCommandMappingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private entries: VirtualCommandMappingEntry[];
+	private commandTargets: CommandTargetOption[];
+	private onSetVirtualCommand: (alias: string, targetCommand: string | undefined) => void;
+	private onDone: () => void;
+
+	constructor(
+		entries: VirtualCommandMappingEntry[],
+		commandTargets: CommandTargetOption[],
+		onSetVirtualCommand: (alias: string, targetCommand: string | undefined) => void,
+		onDone: () => void,
+	) {
+		super();
+		this.entries = entries;
+		this.commandTargets = commandTargets;
+		this.onSetVirtualCommand = onSetVirtualCommand;
+		this.onDone = onDone;
+		this.settingsList = new SettingsList([], 10, getSettingsListTheme(), () => {}, onDone, { enableSearch: true });
+		this.renderContent();
+	}
+
+	private renderContent(): void {
+		this.clear();
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Virtual Commands")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", "Edit or remove virtual slash command aliases."), 0, 0));
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = this.entries
+			.slice()
+			.sort((a, b) => a.alias.localeCompare(b.alias))
+			.map((entry) => ({
+				id: entry.alias,
+				label: entry.alias,
+				description: "Select a target command or remove this mapping",
+				currentValue: resolveTargetLabel(entry.targetCommand, this.commandTargets),
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						`Edit ${entry.alias}`,
+						"Choose target command or remove mapping.",
+						[
+							...this.commandTargets.map((target) => ({
+								value: target.value,
+								label: target.label,
+								description: target.description,
+							})),
+							{ value: REMOVE_MAPPING_VALUE, label: "Remove mapping" },
+						],
+						entry.targetCommand,
+						(selected) => {
+							if (selected === REMOVE_MAPPING_VALUE) {
+								this.onSetVirtualCommand(entry.alias, undefined);
+								this.entries = this.entries.filter((item) => item.alias !== entry.alias);
+								done("removed");
+								this.renderContent();
+								return;
+							}
+							entry.targetCommand = selected;
+							this.onSetVirtualCommand(entry.alias, selected);
+							done(resolveTargetLabel(selected, this.commandTargets));
+						},
+						() => done(),
+					),
+			}));
+
+		this.settingsList = new SettingsList(items, 10, getSettingsListTheme(), () => {}, this.onDone, {
+			enableSearch: true,
+		});
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class VirtualShortcutMappingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private entries: VirtualShortcutMappingEntry[];
+	private commandTargets: CommandTargetOption[];
+	private onSetVirtualShortcut: (shortcut: string, targetCommand: string | undefined) => void;
+	private onDone: () => void;
+
+	constructor(
+		entries: VirtualShortcutMappingEntry[],
+		commandTargets: CommandTargetOption[],
+		onSetVirtualShortcut: (shortcut: string, targetCommand: string | undefined) => void,
+		onDone: () => void,
+	) {
+		super();
+		this.entries = entries;
+		this.commandTargets = commandTargets;
+		this.onSetVirtualShortcut = onSetVirtualShortcut;
+		this.onDone = onDone;
+		this.settingsList = new SettingsList([], 10, getSettingsListTheme(), () => {}, onDone, { enableSearch: true });
+		this.renderContent();
+	}
+
+	private renderContent(): void {
+		this.clear();
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Virtual Keybinds")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", "Edit or remove virtual shortcut mappings."), 0, 0));
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = this.entries
+			.slice()
+			.sort((a, b) => a.shortcut.localeCompare(b.shortcut))
+			.map((entry) => ({
+				id: entry.shortcut,
+				label: entry.shortcut,
+				description: "Select a target command or remove this mapping",
+				currentValue: resolveTargetLabel(entry.targetCommand, this.commandTargets),
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						`Edit ${entry.shortcut}`,
+						"Choose target command or remove mapping.",
+						[
+							...this.commandTargets.map((target) => ({
+								value: target.value,
+								label: target.label,
+								description: target.description,
+							})),
+							{ value: REMOVE_MAPPING_VALUE, label: "Remove mapping" },
+						],
+						entry.targetCommand,
+						(selected) => {
+							if (selected === REMOVE_MAPPING_VALUE) {
+								this.onSetVirtualShortcut(entry.shortcut, undefined);
+								this.entries = this.entries.filter((item) => item.shortcut !== entry.shortcut);
+								done("removed");
+								this.renderContent();
+								return;
+							}
+							entry.targetCommand = selected;
+							this.onSetVirtualShortcut(entry.shortcut, selected);
+							done(resolveTargetLabel(selected, this.commandTargets));
+						},
+						() => done(),
+					),
+			}));
+
+		this.settingsList = new SettingsList(items, 10, getSettingsListTheme(), () => {}, this.onDone, {
+			enableSearch: true,
+		});
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class RemapsSubmenu extends Container {
+	private settingsList: SettingsList;
+
+	constructor(
+		commandEntries: CommandRemapEntry[],
+		shortcutEntries: ShortcutRemapEntry[],
+		virtualCommandMappings: VirtualCommandMappingEntry[],
+		virtualShortcutMappings: VirtualShortcutMappingEntry[],
+		commandTargets: CommandTargetOption[],
+		callbacks: {
+			onCommandRemapChange: (command: string, target: string | undefined) => void;
+			onShortcutRemapChange: (shortcut: string, target: string | undefined) => void;
+			onSetVirtualCommand: (alias: string, targetCommand: string | undefined) => void;
+			onSetVirtualShortcut: (shortcut: string, targetCommand: string | undefined) => void;
+		},
+		onDone: () => void,
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Remaps")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(theme.fg("muted", "Configure explicit extension routing for command/shortcut conflicts."), 0),
+		);
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = [
+			{
+				id: "command-remaps",
+				label: "Commands",
+				description: "Route duplicate slash commands to a preferred extension",
+				currentValue: formatCommandRemapSummary(commandEntries),
+				submenu: (_currentValue, done) =>
+					new CommandRemapSubmenu(commandEntries, callbacks.onCommandRemapChange, () => {
+						done(formatCommandRemapSummary(commandEntries));
+					}),
+			},
+			{
+				id: "shortcut-remaps",
+				label: "Keybinds",
+				description: "Route duplicate extension shortcuts to a preferred extension",
+				currentValue: formatShortcutRemapSummary(shortcutEntries),
+				submenu: (_currentValue, done) =>
+					new ShortcutRemapSubmenu(shortcutEntries, callbacks.onShortcutRemapChange, () => {
+						done(formatShortcutRemapSummary(shortcutEntries));
+					}),
+			},
+			{
+				id: "virtual-commands",
+				label: "Virtual commands",
+				description: "Edit or remove existing virtual slash command aliases",
+				currentValue: formatVirtualCommandSummary(virtualCommandMappings),
+				submenu: (_currentValue, done) =>
+					new VirtualCommandMappingsSubmenu(
+						virtualCommandMappings,
+						commandTargets,
+						callbacks.onSetVirtualCommand,
+						() => done(formatVirtualCommandSummary(virtualCommandMappings)),
+					),
+			},
+			{
+				id: "virtual-shortcuts",
+				label: "Virtual keybinds",
+				description: "Edit or remove existing virtual shortcut mappings",
+				currentValue: formatVirtualShortcutSummary(virtualShortcutMappings),
+				submenu: (_currentValue, done) =>
+					new VirtualShortcutMappingsSubmenu(
+						virtualShortcutMappings,
+						commandTargets,
+						callbacks.onSetVirtualShortcut,
+						() => done(formatVirtualShortcutSummary(virtualShortcutMappings)),
+					),
+			},
+			{
+				id: "add-virtual-command",
+				label: "+ Add vcommand",
+				description: "Create a virtual slash command alias for any existing extension command",
+				currentValue: "",
+				submenu: (_currentValue, done) =>
+					new AddVirtualMappingSubmenu({
+						title: "Add Virtual Command",
+						keyLabel: "Alias command (e.g. /mycommand)",
+						keyDescription: "Enter a slash command alias.",
+						targetDescription: "Choose target command",
+						targets: commandTargets,
+						normalizeKey: (value) => {
+							const trimmed = value.trim();
+							if (!trimmed) return undefined;
+							const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+							if (normalized.length <= 1) return undefined;
+							return normalized;
+						},
+						onSubmit: (alias, targetCommand) => callbacks.onSetVirtualCommand(alias, targetCommand),
+						onDone: done,
+					}),
+			},
+			{
+				id: "add-virtual-shortcut",
+				label: "+ Add vshortcut",
+				description: "Create a virtual shortcut that triggers an extension command",
+				currentValue: "",
+				submenu: (_currentValue, done) =>
+					new AddVirtualMappingSubmenu({
+						title: "Add Virtual Shortcut",
+						keyLabel: "Shortcut (e.g. ctrl+k)",
+						keyDescription: "Enter a keybinding in canonical format.",
+						targetDescription: "Choose target command",
+						targets: commandTargets,
+						normalizeKey: (value) => {
+							const normalized = value.trim().toLowerCase();
+							return normalized.length > 0 ? normalized : undefined;
+						},
+						onSubmit: (shortcut, targetCommand) => callbacks.onSetVirtualShortcut(shortcut, targetCommand),
+						onDone: done,
+					}),
+			},
+		];
+
+		this.settingsList = new SettingsList(items, 8, getSettingsListTheme(), () => {}, onDone, { enableSearch: true });
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
 	}
 }
 
@@ -323,9 +949,33 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Hardware cursor toggle (insert after skill-commands)
+		// Remaps submenu (insert after skill-commands)
 		const skillCommandsIndex = items.findIndex((item) => item.id === "skill-commands");
 		items.splice(skillCommandsIndex + 1, 0, {
+			id: "remaps",
+			label: "Remaps",
+			description: "Configure command and keybind remaps for extension conflicts",
+			currentValue: formatRemapSummary(config.commandRemapEntries, config.shortcutRemapEntries),
+			submenu: (_currentValue, done) =>
+				new RemapsSubmenu(
+					config.commandRemapEntries,
+					config.shortcutRemapEntries,
+					config.virtualCommandMappings,
+					config.virtualShortcutMappings,
+					config.commandTargets,
+					{
+						onCommandRemapChange: callbacks.onCommandRemapChange,
+						onShortcutRemapChange: callbacks.onShortcutRemapChange,
+						onSetVirtualCommand: callbacks.onSetVirtualCommand,
+						onSetVirtualShortcut: callbacks.onSetVirtualShortcut,
+					},
+					() => done(formatRemapSummary(config.commandRemapEntries, config.shortcutRemapEntries)),
+				),
+		});
+
+		// Hardware cursor toggle (insert after remaps)
+		const remapIndex = items.findIndex((item) => item.id === "remaps");
+		items.splice(remapIndex + 1, 0, {
 			id: "show-hardware-cursor",
 			label: "Show hardware cursor",
 			description: "Show the terminal cursor while still positioning it for IME support",
